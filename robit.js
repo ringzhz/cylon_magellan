@@ -1,8 +1,12 @@
-/*global require, console, every */
+/* global require, console, every */
 /* jshint node:true */
 var ARDUINO_PORT = '/dev/ttyACM0';
 
 var Cylon = require('cylon');
+
+var sleep = require('sleep').sleep;
+
+var Promise = require("bluebird");
 
 Cylon.api('http', {
     ssl: false,
@@ -46,7 +50,7 @@ Cylon.robot({
 					ahrsCalibration: [ -2114, -578, 566, 92, -7, 53]
                 }
             }
-        },
+        }
     },
 
     work: function (my) {
@@ -86,32 +90,94 @@ Cylon.robot({
             var idle = Math.abs(leftPower) < 10 && Math.abs(rightPower) < 10;
             if (idle && idleFor < 10) {
                 idleFor++;
-            }
-            if (!idle) {
+                my.setMotorPowers(0, 0);
+            } else if (!idle) {
                 idleFor = 0;
-                my.pilot.enableMotors();
-                //TODO: Change this when pilot can handle ints. For now:
-                //Force powers to be floating point.
-                leftPower+=0.1;
-                rightPower+=0.1;
                 console.log('at power L:' + leftPower + '%\tR:' + rightPower+'%');
-
-            } else {
-                leftPower = 0;
-                rightPower = 0;
-            }
-            //TODO: method for this
-            var msg = {
-                "Cmd": "Pwr",
-                "M1": -rightPower,
-                "M2": -leftPower,
-            };
-
-            if (idleFor < 10) {
-                my.pilot.sendSerial(msg);
+                my.setMotorPowers(leftPower, rightPower);
             }
         });
+    },
+    setMotorPowers: function(leftPower, rightPower) {
+        this.pilot.enableMotors();
+        //TODO: Change this when pilot can handle ints. For now:
+        //Force powers to be floating point.
+        //Zero doesn't need this treatment apparently.
+        if(leftPower && rightPower) {
+            leftPower += 0.001;
+            rightPower += 0.001;
+        }
+        console.log({
+            "Cmd": "Pwr",
+            "M1": -rightPower,
+            "M2": -leftPower
+        });
+        this.pilot.sendSerial({
+            "Cmd": "Pwr",
+            "M1": -rightPower,
+            "M2": -leftPower
+        });
+    },
+    commands: function() {
+        return {
+            findInMotionPowerMin: function() {
+                //TODO: Verify pilot board is ready?
+                var my = this;
+                console.log('In Motion . . .');
+                console.log(arguments);
+                var powerMin;
+                var steps = toStepArray(70, 0, 1);
+
+                var lastHeading;
+                var power = steps.shift();
+                my.setMotorPowers(power, -power);
+                return new Promise(function(resolve, reject){
+                    var intervalId = setInterval(function() {
+                        var newHeading = my.pilot.details.pose.h;
+                        var power = steps.shift();
+                        if(!power) {
+                            reject({
+                                msg: 'Couldn\'t determine min power. Robot failed to stop spinning?'
+                            });
+                        }
+                        console.log('trying: '+power);
+                        console.log(my.setMotorPowers);
+                        if (lastHeading == newHeading) {
+                            console.log('Found Min Power: '+power);
+                            resolve({
+                                inMotion: power
+                            });
+                            my.setMotorPowers(0, 0);
+                            clearInterval(intervalId);
+                        } else {
+                            my.setMotorPowers(power, -power);
+                            lastHeading = newHeading;
+                        }
+                    }, 1500);
+                });
+            },
+            findFromStallPowerMin: function() {
+                console.log('From Stall . . .');
+                return {
+                    fromStall: 5
+                };
+            }
+        }
     }
 });
+
+function toStepArray(_from, to, stepSize) {
+    stepSize = (_from < to) ? stepSize : -stepSize;
+    var stepArray = [];
+    console.log(_from)
+    console.log(to)
+    console.log(stepSize)
+    for(var i = _from; ((i <= to) && (stepSize > 0)) || ((i >= to) && (stepSize < 0)); i+= stepSize) {
+        console.log('    '+i);
+        stepArray.push(i);
+    }
+    return stepArray;
+}
+
 
 Cylon.start();
