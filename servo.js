@@ -17,7 +17,7 @@ var PIXY_CMD = '/home/pi/workspace/pixy/build/hello_pixy/hello_pixy';
 Cylon.api('http', {
     ssl: false,
     host: '0.0.0.0',
-    serveDir: '../robeaux'
+    //serveDir: '../robeaux'
 });
 
 Cylon.robot({
@@ -27,6 +27,7 @@ Cylon.robot({
     _increment: 10,
     _pos: {},
     _lastPos: null,
+
     connections: {
         arduino: {
             adaptor: 'raspi',
@@ -41,22 +42,70 @@ Cylon.robot({
                 pilot: {
                     driver: 's3pilot',
                     geometry: {
-                        ticksPerMeter: 240,
-                        mMax: 450
-                    }/*,
-                    ahrsCalibration: {
-                        a_x: -2114,
-                        a_y: -578,
-                        a_z: 566,
-                        g_x: 92,
-                        g_y: -7,
-                        g_z: 53
-                    }*/
+                        ticksPerMeter: 240.01,
+                        mMax: 452.1
+                    },
+                    //ahrsCalibration: {
+                    //    a_x: -2114,
+                    //    a_y: -578,
+                    //    a_z: 566,
+                    //    g_x: 92,
+                    //    g_y: -7,
+                    //    g_z: 53
+                    //},
+                    mPID: [0.005, 0.0000010, 0.0000010, 100.1]
+                    //hPID: [0.5, 0.0000010, 0.0000010, 100.1]
+                }
+            }
+        },
+        button: {
+            adaptor: 'raspi',
+            pin: 38, //physical: 21, OS: 9
+            devices: {
+                button: {
+                    pin: 38,
+                    driver: 'button'
                 }
             }
         }
     },
 
+    commands: function() {
+        return {
+            setPower:   this.setPower.bind(this),
+            goDistance: this.goDistance.bind(this),
+            setMotorPid: this.setMotorPid.bind(this),
+            turnTo: this.turnTo.bind(this)
+        };
+    },
+
+    setPower: function(power) {
+        console.log('setting power: '+power);
+        this.pilot.setMotorPower({
+            M1: +power,
+            M2: 0.0001
+        });
+    },
+
+    goDistance: function(distance) {
+        this.pilot.driveDistance({
+            Dist: 1.01,
+            Pwr: 40.01
+        });
+    },
+
+    setMotorPid: function(kp, ki, kd, ke) {
+        this.pilot.configure({
+            mPID: [+kp, +ki, +kd, +ke]
+        });
+    },
+
+    turnTo: function(pow, angle) {
+        this.pilot.turnTo({
+            Hdg: 0.01+Number(angle),
+            Pwr: 0.01+Number(pow)
+        });
+    },
 
     getConeCenter: function() {
         var piData = shell.exec(PIXY_CMD, {silent:true}).output;
@@ -86,15 +135,21 @@ Cylon.robot({
         if ((my._servoAngle < 20) || (my._servoAngle > 130)) { my._increment *= -1; }
         my.servo.angle(my._servoAngle);
         console.log('servo angle: '+my.servo.currentAngle());
-        var x = my.getConeCenter();
-        if (x) {
+        var coneCenter = my.getConeCenter();
+        if (coneCenter && coneCenter.area) {
+            console.log('cone spotted @x:'+coneCenter.x+' area:'+coneCenter.area);
             my._state = 'follow';
         }
     },
 
     follow: function(my) {
         console.log('FOLLOWING');
-        var x = my.getConeCenter();
+        if(my._desiredHeading && Math.abs(my._desiredHeading - my._pos.h) > 5) {
+            console.log('waiting for turn to: '+my._desiredHeading);
+            return;
+        }
+        var coneCenter = my.getConeCenter();
+        var x = coneCenter.x;
         if (!x) {
             console.log('cone lost! sweeping again.');
             my._state = 'sweep';
@@ -113,28 +168,47 @@ Cylon.robot({
         }
 
         //we want my._servoAngle around 76
-        var desiredHeading = my._pos.h + 76 - my._servoAngle;
+        my._desiredHeading = my._pos.h + (76 - my._servoAngle)/2;
         console.log('x: ' +x);
         console.log('correction: ' +correction);
-        console.log('desired heading: ' +desiredHeading);
+        console.log('desired heading: ' + my._desiredHeading);
         my.pilot.turnTo({
-            Hdg: desiredHeading
+            Hdg: my._desiredHeading
         });
         my.servo.angle(my._servoAngle);
         console.log('servo angle: '+my.servo.currentAngle());
     },
 
     work: function (my) {
-        my.pilot.enableMotors();
-        every((0.5).second(), function () {
-            console.log('==state: '+my._state);
 
-            console.log('Pose:');
-            console.log(my._pos);
+        // this is actually on 'push'. Just wired backwards
+        my.button.on('release', function(evt) {
+            console.log('bump!');
+            this._state = 'backup';
+        }.bind(my));
+
+        // hPID: [Kp, Ki, Kd]
+        //my.pilot.configure();//{hPID: [2, 0.8, 0.02]});
+        every((0.5).second(), function () {
+            //console.log('==state: '+my._state);
+
+            my._lastPos = my._pos;
+            my._pos = my.pilot.details.pose;
+
+            //console.log('Pose:');
+            //console.log(my._pos);
 
             switch(my._state) {
                 case 'settling' :
+                    console.log('settling');
+                    console.log(my._pos);
                     my.settling(my);
+                    break;
+                case 'wait a tick':
+                    my._state = 'straight';
+                    break;
+                case 'straight':
+                    my._state = 'chill';
                     break;
                 case 'sweep':
                     my.sweep(my);
@@ -142,18 +216,22 @@ Cylon.robot({
                 case 'follow':
                     my.follow(my);
                     break;
+                case 'chill':
+                    break;
             }
 
         });
+
+
     },
 
     settling: function(my) {
-        my._lastPos = my._pos;
-        my._pos = my.pilot.details.pose;
         if(my._pos.h && my._pos.equals(my._lastPos)) {
-            console.log('ALL SETTLED');
+            console.log('----------------ALL SETTLED----------------');
             //done settling
-            my._state = 'sweep';
+            my._state = 'wait a tick';
+            //my.pilot.configure({mPID: [10, 0.8, 0.02]});
+            my.pilot.enableMotors();
             my.pilot.reset();
         }
     }
